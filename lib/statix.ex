@@ -232,6 +232,17 @@ defmodule Statix do
   """
   @callback measure(key, function :: (() -> result)) :: result when result: var
 
+  def enabled?(module) do
+    enabled? = Application.get_env(:statix, module)[:enabled]
+
+    if is_nil(enabled?) do
+      # defaults to true for regressions
+      true
+    end
+
+    enabled?
+  end
+
   defmacro __using__(opts) do
     current_conn =
       if Keyword.get(opts, :runtime_config, false) do
@@ -239,10 +250,13 @@ defmodule Statix do
           @statix_header_key Module.concat(__MODULE__, :__statix_header__)
 
           def connect() do
-            conn = Statix.new_conn(__MODULE__)
-            Application.put_env(:statix, @statix_header_key, conn.header)
+            if Statix.enabled?(__MODULE__) do
+              conn = Statix.new_conn(__MODULE__)
+              Application.put_env(:statix, @statix_header_key, conn.header)
 
-            Statix.open_conn(conn)
+              Statix.open_conn(conn)
+            end
+
             :ok
           end
 
@@ -254,28 +268,31 @@ defmodule Statix do
         end
       else
         quote do
-          @statix_conn Statix.new_conn(__MODULE__)
+          if Statix.enabled?(__MODULE__) do
+            @statix_conn Statix.new_conn(__MODULE__)
 
-          def connect() do
-            conn = @statix_conn
-            current_conn = Statix.new_conn(__MODULE__)
+            def connect() do
+              conn = @statix_conn
+              current_conn = Statix.new_conn(__MODULE__)
 
-            if conn.header != current_conn.header do
-              raise(
-                "the current configuration for #{inspect(__MODULE__)} differs from " <>
-                  "the one that was given during the compilation.\n" <>
-                  "Be sure to use :runtime_config option " <>
-                  "if you want to have different configurations"
-              )
+              if conn.header != current_conn.header do
+                raise(
+                  "the current configuration for #{inspect(__MODULE__)} differs from " <>
+                    "the one that was given during the compilation.\n" <>
+                    "Be sure to use :runtime_config option " <> "if you want to have different configurations"
+                )
+              end
+
+              Statix.open_conn(conn)
+              :ok
             end
 
-            Statix.open_conn(conn)
-            :ok
-          end
-
-          @compile {:inline, [current_conn: 0]}
-          defp current_conn() do
-            @statix_conn
+            @compile {:inline, [current_conn: 0]}
+            defp current_conn() do
+              @statix_conn
+            end
+          else
+            def connect, do: :ok
           end
         end
       end
@@ -286,35 +303,45 @@ defmodule Statix do
       unquote(current_conn)
 
       def increment(key, val \\ 1, options \\ []) when is_number(val) do
-        Statix.transmit(current_conn(), :counter, key, val, options)
+        log_if_enabled(fn -> Statix.transmit(current_conn(), :counter, key, val, options) end)
       end
 
       def decrement(key, val \\ 1, options \\ []) when is_number(val) do
-        Statix.transmit(current_conn(), :counter, key, [?-, to_string(val)], options)
+        log_if_enabled(fn -> Statix.transmit(current_conn(), :counter, key, [?-, to_string(val)], options) end)
       end
 
       def gauge(key, val, options \\ []) do
-        Statix.transmit(current_conn(), :gauge, key, val, options)
+        log_if_enabled(fn -> Statix.transmit(current_conn(), :gauge, key, val, options) end)
       end
 
       def histogram(key, val, options \\ []) do
-        Statix.transmit(current_conn(), :histogram, key, val, options)
+        log_if_enabled(fn -> Statix.transmit(current_conn(), :histogram, key, val, options) end)
       end
 
       def timing(key, val, options \\ []) do
-        Statix.transmit(current_conn(), :timing, key, val, options)
+        log_if_enabled(fn -> Statix.transmit(current_conn(), :timing, key, val, options) end)
       end
 
       def measure(key, options \\ [], fun) when is_function(fun, 0) do
-        {elapsed, result} = :timer.tc(fun)
+        log_if_enabled(fn ->
+          {elapsed, result} = :timer.tc(fun)
 
-        timing(key, div(elapsed, 1000), options)
+          timing(key, div(elapsed, 1000), options)
 
-        result
+          result
+        end)
       end
 
       def set(key, val, options \\ []) do
-        Statix.transmit(current_conn(), :set, key, val, options)
+        log_if_enabled(fn -> Statix.transmit(current_conn(), :set, key, val, options) end)
+      end
+
+      defp log_if_enabled(action) do
+        if Statix.enabled?(__MODULE__) do
+          action.()
+        else
+          {:error, :not_enabled}
+        end
       end
 
       defoverridable(
