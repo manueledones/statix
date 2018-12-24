@@ -261,6 +261,17 @@ defmodule Statix do
   """
   @callback measure(key, function :: (() -> result)) :: result when result: var
 
+  def enabled?(module) do
+    enabled? = Application.get_env(:statix, module)[:enabled]
+
+    if is_nil(enabled?) do
+      # defaults to true for regressions
+      true
+    end
+
+    enabled?
+  end
+
   defmacro __using__(opts) do
     current_statix =
       if Keyword.get(opts, :runtime_config, false) do
@@ -268,10 +279,13 @@ defmodule Statix do
           @statix_key Module.concat(__MODULE__, :__statix__)
 
           def connect(options \\ []) do
-            statix = Statix.new(__MODULE__, options)
-            Application.put_env(:statix, @statix_key, statix)
+            if Statix.enabled?(__MODULE__) do
+              statix = Statix.new(__MODULE__, options)
+              Application.put_env(:statix, @statix_key, statix)
 
-            Statix.open(statix)
+              Statix.open(statix)
+            end
+
             :ok
           end
 
@@ -283,9 +297,10 @@ defmodule Statix do
         end
       else
         quote do
-          @statix Statix.new(__MODULE__, [])
+          if Statix.enabled?(__MODULE__) do
+            @statix Statix.new(__MODULE__, [])
 
-          def connect(options \\ []) do
+            def connect(options \\ []) do
             if @statix != Statix.new(__MODULE__, options) do
               raise(
                 "the current configuration for #{inspect(__MODULE__)} differs from " <>
@@ -295,13 +310,16 @@ defmodule Statix do
               )
             end
 
-            Statix.open(@statix)
-            :ok
+              Statix.open(@statix)
+              :ok
+            end
+
+            @compile {:inline, [current_statix: 0]}
+            
+            defp current_statix(), do: @statix
+          else
+            def connect, do: :ok
           end
-
-          @compile {:inline, [current_statix: 0]}
-
-          defp current_statix(), do: @statix
         end
       end
 
@@ -311,35 +329,45 @@ defmodule Statix do
       unquote(current_statix)
 
       def increment(key, val \\ 1, options \\ []) when is_number(val) do
-        Statix.transmit(current_statix(), :counter, key, val, options)
+        log_if_enabled(fn -> Statix.transmit(current_statix(), :counter, key, val, options) end)
       end
 
       def decrement(key, val \\ 1, options \\ []) when is_number(val) do
-        Statix.transmit(current_statix(), :counter, key, [?-, to_string(val)], options)
+        log_if_enabled(fn -> Statix.transmit(current_statix(), :counter, key, [?-, to_string(val)], options) end)
       end
 
       def gauge(key, val, options \\ []) do
-        Statix.transmit(current_statix(), :gauge, key, val, options)
+        log_if_enabled(fn -> Statix.transmit(current_statix(), :gauge, key, val, options) end)
       end
 
       def histogram(key, val, options \\ []) do
-        Statix.transmit(current_statix(), :histogram, key, val, options)
+        log_if_enabled(fn -> Statix.transmit(current_statix(), :histogram, key, val, options) end)
       end
 
       def timing(key, val, options \\ []) do
-        Statix.transmit(current_statix(), :timing, key, val, options)
+        log_if_enabled(fn -> Statix.transmit(current_statix(), :timing, key, val, options) end)
       end
 
       def measure(key, options \\ [], fun) when is_function(fun, 0) do
-        {elapsed, result} = :timer.tc(fun)
+        log_if_enabled(fn ->
+          {elapsed, result} = :timer.tc(fun)
 
-        timing(key, div(elapsed, 1000), options)
+          timing(key, div(elapsed, 1000), options)
 
-        result
+          result
+        end)
       end
 
       def set(key, val, options \\ []) do
-        Statix.transmit(current_statix(), :set, key, val, options)
+        log_if_enabled(fn -> Statix.transmit(current_statix(), :set, key, val, options)) end)
+      end
+
+      defp log_if_enabled(action) do
+        if Statix.enabled?(__MODULE__) do
+          action.()
+        else
+          {:error, :not_enabled}
+        end
       end
 
       defoverridable(
