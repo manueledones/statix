@@ -10,10 +10,10 @@ defmodule Statix do
       end
 
   This will make `MyApp.Statix` a Statix connection that implements the `Statix`
-  behaviour. This connection can be started with the `MyApp.Statix.connect/0`
-  function (see the `c:connect/0` callback) and a few functions can be called on
+  behaviour. This connection can be started with the `MyApp.Statix.connect/1`
+  function (see the `c:connect/1` callback) and a few functions can be called on
   it to report metrics to the StatsD-compatible server read from the
-  configuration. Usually, `connect/0` is called in your application's
+  configuration. Usually, `connect/1` is called in your application's
   `c:Application.start/2` callback:
 
       def start(_type, _args) do
@@ -51,9 +51,12 @@ defmodule Statix do
       server is running. Defaults to `8125`.
     * `:tags` - ([binary]) a list of global tags that will be sent with all
       metrics. By default this option is not present.
+      See the "Tags" section for more information.
+    * `:pool_size` - (integer) number of ports used to distribute the metric sending.
+      Defaults to `1`. See the "Pooling" section for more information.
 
-  By default, the configuration is evaluated once, at compile time. If you plan
-  on changing the configuration at runtime, you must specify the
+  By default, the configuration is evaluated once, at compile time.
+  If you plan on changing the configuration at runtime, you must specify the
   `:runtime_config` option to be `true` when calling `use Statix`:
 
       defmodule MyApp.Statix do
@@ -69,6 +72,11 @@ defmodule Statix do
   In the example above, the `memory` measurement has been tagged with
   `region:east`. Not all StatsD-compatible servers support this feature.
 
+  Tags could also be added globally to be included in every metric sent:
+
+      config :statix, tags: ["env:\#{Mix.env()}"]
+
+
   ## Sampling
 
   All the callbacks from the `Statix` behaviour that accept options support
@@ -79,6 +87,20 @@ defmodule Statix do
   In the example above, the UDP packet will only be sent to the server about
   half of the time, but the resulting value will be adjusted on the server
   according to the given sample rate.
+
+  ## Pooling
+
+  Statix transmits data using [ports](https://hexdocs.pm/elixir/Port.html).
+
+  If a port is busy when you try to send a command to it, the sender may be suspended and some blocking may occur. This becomes more of an issue in highly concurrent environments.
+
+  In order to get around that, Statix allows you to start multiple ports, and randomly picks one at the time of transmit.
+
+  This option can be configured via the `:pool_size` option:
+
+      config :statix, MyApp.Statix,
+        pool_size: 3
+
   """
 
   alias __MODULE__.Conn
@@ -88,12 +110,19 @@ defmodule Statix do
   @type on_send :: :ok | {:error, term}
 
   @doc """
-  Opens the connection to the StatsD-compatible server.
-
-  The configuration is read from the configuration for the `:statix` application
-  (both globally and per connection).
+  Same as `connect([])`.
   """
   @callback connect() :: :ok
+
+  @doc """
+  Opens the connection to the StatsD-compatible server.
+
+  The configuration is read from the environment for the `:statix` application
+  (both globally and per connection).
+
+  The given `options` override the configuration read from the application environment.
+  """
+  @callback connect(options :: keyword) :: :ok
 
   @doc """
   Increments the StatsD counter identified by `key` by the given `value`.
@@ -179,6 +208,11 @@ defmodule Statix do
   @callback histogram(key, value :: String.Chars.t()) :: on_send
 
   @doc """
+  Same as `timing(key, value, [])`.
+  """
+  @callback timing(key, value :: String.Chars.t()) :: on_send
+
+  @doc """
   Writes the given `value` to the StatsD timing identified by `key`.
 
   `value` is expected in milliseconds.
@@ -190,11 +224,6 @@ defmodule Statix do
 
   """
   @callback timing(key, value :: String.Chars.t(), options) :: on_send
-
-  @doc """
-  Same as `timing(key, value, [])`.
-  """
-  @callback timing(key, value :: String.Chars.t()) :: on_send
 
   @doc """
   Writes the given `value` to the StatsD set identified by `key`.
@@ -244,53 +273,50 @@ defmodule Statix do
   end
 
   defmacro __using__(opts) do
-    current_conn =
+    current_statix =
       if Keyword.get(opts, :runtime_config, false) do
         quote do
-          @statix_header_key Module.concat(__MODULE__, :__statix_header__)
+          @statix_key Module.concat(__MODULE__, :__statix__)
 
-          def connect() do
+          def connect(options \\ []) do
             if Statix.enabled?(__MODULE__) do
-              conn = Statix.new_conn(__MODULE__)
-              Application.put_env(:statix, @statix_header_key, conn.header)
+              statix = Statix.new(__MODULE__, options)
+              Application.put_env(:statix, @statix_key, statix)
 
-              Statix.open_conn(conn)
+              Statix.open(statix)
             end
 
             :ok
           end
 
-          @compile {:inline, [current_conn: 0]}
-          defp current_conn() do
-            header = Application.fetch_env!(:statix, @statix_header_key)
-            %Statix.Conn{header: header, sock: __MODULE__}
+          @compile {:inline, [current_statix: 0]}
+
+          defp current_statix() do
+            Application.fetch_env!(:statix, @statix_key)
           end
         end
       else
         quote do
           if Statix.enabled?(__MODULE__) do
-            @statix_conn Statix.new_conn(__MODULE__)
+            @statix Statix.new(__MODULE__, [])
 
-            def connect() do
-              conn = @statix_conn
-              current_conn = Statix.new_conn(__MODULE__)
+            def connect(options \\ []) do
+            if @statix != Statix.new(__MODULE__, options) do
+              raise(
+                "the current configuration for #{inspect(__MODULE__)} differs from " <>
+                  "the one that was given during the compilation.\n" <>
+                  "Be sure to use :runtime_config option " <>
+                  "if you want to have different configurations"
+              )
+            end
 
-              if conn.header != current_conn.header do
-                raise(
-                  "the current configuration for #{inspect(__MODULE__)} differs from " <>
-                    "the one that was given during the compilation.\n" <>
-                    "Be sure to use :runtime_config option " <> "if you want to have different configurations"
-                )
-              end
-
-              Statix.open_conn(conn)
+              Statix.open(@statix)
               :ok
             end
 
-            @compile {:inline, [current_conn: 0]}
-            defp current_conn() do
-              @statix_conn
-            end
+            @compile {:inline, [current_statix: 0]}
+            
+            defp current_statix(), do: @statix
           else
             def connect, do: :ok
           end
@@ -300,26 +326,26 @@ defmodule Statix do
     quote location: :keep do
       @behaviour Statix
 
-      unquote(current_conn)
+      unquote(current_statix)
 
       def increment(key, val \\ 1, options \\ []) when is_number(val) do
-        log_if_enabled(fn -> Statix.transmit(current_conn(), :counter, key, val, options) end)
+        log_if_enabled(fn -> Statix.transmit(current_statix(), :counter, key, val, options) end)
       end
 
       def decrement(key, val \\ 1, options \\ []) when is_number(val) do
-        log_if_enabled(fn -> Statix.transmit(current_conn(), :counter, key, [?-, to_string(val)], options) end)
+        log_if_enabled(fn -> Statix.transmit(current_statix(), :counter, key, [?-, to_string(val)], options) end)
       end
 
       def gauge(key, val, options \\ []) do
-        log_if_enabled(fn -> Statix.transmit(current_conn(), :gauge, key, val, options) end)
+        log_if_enabled(fn -> Statix.transmit(current_statix(), :gauge, key, val, options) end)
       end
 
       def histogram(key, val, options \\ []) do
-        log_if_enabled(fn -> Statix.transmit(current_conn(), :histogram, key, val, options) end)
+        log_if_enabled(fn -> Statix.transmit(current_statix(), :histogram, key, val, options) end)
       end
 
       def timing(key, val, options \\ []) do
-        log_if_enabled(fn -> Statix.transmit(current_conn(), :timing, key, val, options) end)
+        log_if_enabled(fn -> Statix.transmit(current_statix(), :timing, key, val, options) end)
       end
 
       def measure(key, options \\ [], fun) when is_function(fun, 0) do
@@ -333,7 +359,7 @@ defmodule Statix do
       end
 
       def set(key, val, options \\ []) do
-        log_if_enabled(fn -> Statix.transmit(current_conn(), :set, key, val, options) end)
+        log_if_enabled(fn -> Statix.transmit(current_statix(), :set, key, val, options) end)
       end
 
       defp log_if_enabled(action) do
@@ -356,65 +382,97 @@ defmodule Statix do
     end
   end
 
+  defstruct [:conn, :tags, :pool]
+
   @doc false
-  def new_conn(module) do
-    {host, port, prefix} = load_config(module)
-    conn = Conn.new(host, port)
-    header = IO.iodata_to_binary([conn.header | prefix])
-    %{conn | header: header, sock: module}
+  def new(module, options) do
+    config = get_config(module, options)
+    conn = Conn.new(config.host, config.port)
+    header = IO.iodata_to_binary([conn.header | config.prefix])
+
+    %__MODULE__{
+      conn: %{conn | header: header},
+      pool: build_pool(module, config.pool_size),
+      tags: config.tags
+    }
+  end
+
+  defp build_pool(module, 1), do: [module]
+
+  defp build_pool(module, size) do
+    Enum.map(1..size, &:"#{module}-#{&1}")
   end
 
   @doc false
-  def open_conn(%Conn{sock: module} = conn) do
-    conn = Conn.open(conn)
-    Process.register(conn.sock, module)
+  def open(%__MODULE__{conn: conn, pool: pool}) do
+    Enum.each(pool, fn name ->
+      %{sock: sock} = Conn.open(conn)
+      Process.register(sock, name)
+    end)
   end
 
   @doc false
-  def transmit(conn, type, key, val, options)
+  def transmit(
+        %{conn: conn, pool: pool, tags: tags},
+        type,
+        key,
+        value,
+        options
+      )
       when (is_binary(key) or is_list(key)) and is_list(options) do
     sample_rate = Keyword.get(options, :sample_rate)
 
     if is_nil(sample_rate) or sample_rate >= :rand.uniform() do
-      Conn.transmit(conn, type, key, to_string(val), put_global_tags(conn.sock, options))
+      options = put_global_tags(options, tags)
+
+      %{conn | sock: pick_name(pool)}
+      |> Conn.transmit(type, key, to_string(value), options)
     else
       :ok
     end
   end
 
-  defp load_config(module) do
-    {env2, env1} =
-      Application.get_all_env(:statix)
+  defp pick_name([name]), do: name
+  defp pick_name(pool), do: Enum.random(pool)
+
+  defp get_config(module, overrides) do
+    {module_env, global_env} =
+      :statix
+      |> Application.get_all_env()
       |> Keyword.pop(module, [])
 
-    {prefix1, env1} = Keyword.pop_first(env1, :prefix)
-    {prefix2, env2} = Keyword.pop_first(env2, :prefix)
-    env = Keyword.merge(env1, env2)
+    env = module_env ++ global_env
+    options = overrides ++ env
 
-    host = Keyword.get(env, :host, "127.0.0.1")
-    port = Keyword.get(env, :port, 8125)
-    prefix = build_prefix(prefix1, prefix2)
-    {host, port, prefix}
+    tags =
+      Keyword.get_lazy(overrides, :tags, fn ->
+        env |> Keyword.get_values(:tags) |> Enum.concat()
+      end)
+
+    %{
+      prefix: build_prefix(env, overrides),
+      host: Keyword.get(options, :host, "127.0.0.1"),
+      port: Keyword.get(options, :port, 8125),
+      pool_size: Keyword.get(options, :pool_size, 1),
+      tags: tags
+    }
   end
 
-  defp build_prefix(part1, part2) do
-    case {part1, part2} do
-      {nil, nil} -> ""
-      {_p1, nil} -> [part1, ?.]
-      {nil, _p2} -> [part2, ?.]
-      {_p1, _p2} -> [part1, ?., part2, ?.]
+  defp build_prefix(env, overrides) do
+    case Keyword.fetch(overrides, :prefix) do
+      {:ok, prefix} ->
+        [prefix, ?.]
+
+      :error ->
+        env
+        |> Keyword.get_values(:prefix)
+        |> Enum.map_join(&(&1 && [&1, ?.]))
     end
   end
 
-  defp put_global_tags(module, options) do
-    conn_tags =
-      :statix
-      |> Application.get_env(module, [])
-      |> Keyword.get(:tags, [])
+  defp put_global_tags(options, []), do: options
 
-    app_tags = Application.get_env(:statix, :tags, [])
-    global_tags = conn_tags ++ app_tags
-
-    Keyword.update(options, :tags, global_tags, &(&1 ++ global_tags))
+  defp put_global_tags(options, tags) do
+    Keyword.update(options, :tags, tags, &(&1 ++ tags))
   end
 end
