@@ -359,7 +359,7 @@ defmodule Statix do
       end
 
       def set(key, val, options \\ []) do
-        log_if_enabled(fn -> Statix.transmit(current_statix(), :set, key, val, options)) end)
+        log_if_enabled(fn -> Statix.transmit(current_statix(), :set, key, val, options) end)
       end
 
       defp log_if_enabled(action) do
