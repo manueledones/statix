@@ -261,15 +261,13 @@ defmodule Statix do
   """
   @callback measure(key, function :: (() -> result)) :: result when result: var
 
+  @spec enabled?(module()) :: boolean
   def enabled?(module) do
-    enabled? = Application.get_env(:statix, module)[:enabled]
-
-    if is_nil(enabled?) do
+    case Application.get_env(:statix, module)[:enabled] do
       # defaults to true for regressions
-      true
+      nil -> true
+      state -> state
     end
-
-    enabled?
   end
 
   defmacro __using__(opts) do
