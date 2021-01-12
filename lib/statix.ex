@@ -377,16 +377,16 @@ defmodule Statix do
         log_if_enabled(fn -> Statix.transmit(current_statix(), :set, key, val, options) end)
       end
 
+      def event(title, text, options \\ []) do
+        log_if_enabled(fn -> Statix.transmit(current_statix(), :event, title, text, options) end)
+      end
+
       defp log_if_enabled(action) do
         if Statix.enabled?(__MODULE__) do
           action.()
         else
           {:error, :not_enabled}
         end
-      end
-
-      def event(title, text, options \\ []) do
-        Statix.transmit(current_statix(), :event, title, text, options)
       end
 
       defoverridable(
