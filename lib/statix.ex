@@ -349,13 +349,15 @@ defmodule Statix do
       end
 
       def measure(key, options \\ [], fun) when is_function(fun, 0) do
-        log_if_enabled(fn ->
+        if Statix.enabled?(__MODULE__) do
           {elapsed, result} = :timer.tc(fun)
 
           timing(key, div(elapsed, 1000), options)
 
           result
-        end)
+        else
+          fun.()
+        end
       end
 
       def set(key, val, options \\ []) do
