@@ -279,6 +279,8 @@ defmodule Statix do
   """
   @callback measure(key, function :: (() -> result)) :: result when result: var
 
+  @callback close() :: true
+
   def enabled?(module) do
     enabled? = Application.get_env(:statix, module)[:enabled]
 
@@ -345,6 +347,10 @@ defmodule Statix do
       @behaviour Statix
 
       unquote(current_statix)
+
+      def close() do
+        log_if_enabled(fn -> Statix.close(current_statix()) end)
+      end
 
       def increment(key, val \\ 1, options \\ []) when is_number(val) do
         log_if_enabled(fn -> Statix.transmit(current_statix(), :counter, key, val, options) end)
@@ -434,6 +440,12 @@ defmodule Statix do
       %{sock: sock} = Conn.open(conn)
       Process.register(sock, name)
     end)
+  end
+
+  @doc false
+  def close(%{conn: conn, pool: pool}) do
+    %{conn | sock: pick_name(pool)}
+      |> Conn.close()
   end
 
   @doc false

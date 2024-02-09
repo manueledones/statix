@@ -30,6 +30,10 @@ defmodule Statix.Conn do
     %__MODULE__{conn | sock: sock}
   end
 
+  def close(%__MODULE__{sock: sock}) do
+    Port.close(sock)
+  end
+
   def transmit(%__MODULE__{header: header, sock: sock}, type, key, val, options)
       when is_binary(val) and is_list(options) do
     result =
